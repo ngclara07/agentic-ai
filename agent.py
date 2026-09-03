@@ -1,11 +1,11 @@
 # agent.py
-# this is the core pydantic AI implementation 
-
-# currently pydantic AI allows normal python functions to be registered using 
-# "@agent.tool_plain"; tools requiring dependency context use "@agent.tool"
-
-# for web access, current pydantic AI exposes "WebSearchTool" through a "NativeTool" 
-# capability when using an openAI responses model 
+# Core Pydantic AI implementation.
+#
+# Local development:
+#   Pydantic AI -> Ollama -> qwen3:4b
+#
+# Streamlit Cloud:
+#   Pydantic AI -> Groq OpenAI-compatible API -> Qwen model
 
 from __future__ import annotations
 
@@ -16,6 +16,8 @@ from dotenv import load_dotenv
 from pydantic_ai import Agent
 from pydantic_ai.models.ollama import OllamaModel
 from pydantic_ai.providers.ollama import OllamaProvider
+from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.usage import UsageLimits
 
 from memory import (
@@ -36,34 +38,88 @@ from conversation_store import (
 )
 
 
+# =========================================================
+# Environment Configuration
+# =========================================================
+
 load_dotenv()
 
 
-MODEL_NAME = os.getenv(
-    "AI_MODEL",
-    "qwen3:4b",
-)
-
-OLLAMA_BASE_URL = os.getenv(
-    "OLLAMA_BASE_URL",
-    "http://127.0.0.1:11434/v1",
-)
+AI_PROVIDER = os.getenv(
+    "AI_PROVIDER",
+    "ollama",
+).strip().lower()
 
 
-model = OllamaModel(
-    MODEL_NAME,
-    provider=OllamaProvider(
-        base_url=OLLAMA_BASE_URL,
-    ),
-)
+# =========================================================
+# Model Configuration
+# =========================================================
 
+if AI_PROVIDER == "groq":
+
+    MODEL_NAME = os.getenv(
+        "AI_MODEL",
+        "qwen/qwen3-32b",
+    )
+
+    GROQ_API_KEY = os.getenv(
+        "GROQ_API_KEY"
+    )
+
+    if not GROQ_API_KEY:
+        raise RuntimeError(
+            "GROQ_API_KEY is required when "
+            "AI_PROVIDER=groq."
+        )
+
+    model = OpenAIChatModel(
+        MODEL_NAME,
+        provider=OpenAIProvider(
+            base_url=(
+                "https://api.groq.com/openai/v1"
+            ),
+            api_key=GROQ_API_KEY,
+        ),
+    )
+
+
+elif AI_PROVIDER == "ollama":
+
+    MODEL_NAME = os.getenv(
+        "AI_MODEL",
+        "qwen3:4b",
+    )
+
+    OLLAMA_BASE_URL = os.getenv(
+        "OLLAMA_BASE_URL",
+        "http://127.0.0.1:11434/v1",
+    )
+
+    model = OllamaModel(
+        MODEL_NAME,
+        provider=OllamaProvider(
+            base_url=OLLAMA_BASE_URL,
+        ),
+    )
+
+
+else:
+
+    raise ValueError(
+        f"Unsupported AI_PROVIDER: {AI_PROVIDER}. "
+        "Supported providers are 'ollama' and 'groq'."
+    )
+
+
+# =========================================================
+# Agent Definition
+# =========================================================
 
 agent = Agent(
     model,
 
     instructions="""
-You are a local agentic AI assistant running through
-Pydantic AI and Ollama.
+You are an agentic AI assistant built with Pydantic AI.
 
 Your objective is to accomplish user tasks rather than
 merely generate conversational responses.
@@ -80,7 +136,7 @@ For each request:
 Available capabilities include:
 
 - mathematical calculations
-- current local date and time
+- current local/server date and time
 - saving notes
 - reading saved notes
 - listing saved notes
@@ -89,15 +145,20 @@ Available capabilities include:
 Rules:
 
 - Use the calculator for non-trivial arithmetic.
-- Use the time tool when exact local time is requested.
-- Save a note only when the user requests persistence.
+- Use the time tool when exact current time is requested.
+- Save a note only when the user explicitly requests persistence.
 - Read notes using the appropriate note tool.
 - Never claim that a tool was executed unless it actually succeeded.
 - Never fabricate tool results.
 - Do not reveal hidden chain-of-thought.
+- If a tool fails, explain the failure clearly.
 """,
 )
 
+
+# =========================================================
+# Agent Tools
+# =========================================================
 
 @agent.tool_plain
 def calculate(expression: str) -> str:
@@ -110,7 +171,7 @@ def calculate(expression: str) -> str:
 @agent.tool_plain
 def current_time() -> str:
     """
-    Return the current local date and time.
+    Return the current local/server date and time.
     """
     return get_current_time()
 
@@ -121,7 +182,7 @@ def create_note(
     content: str,
 ) -> str:
     """
-    Save a text note locally.
+    Save a text note.
     """
     return save_note(
         title=title,
@@ -145,10 +206,17 @@ def available_notes() -> str:
     return list_notes()
 
 
+# =========================================================
+# Agent Runner
+# =========================================================
+
 def run_agent(
     message: str,
     session_id: str,
 ) -> str:
+    """
+    Run the agent with persisted conversation history.
+    """
 
     history = load_history(
         session_id
